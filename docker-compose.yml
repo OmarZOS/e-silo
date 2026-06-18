@@ -4,215 +4,28 @@
 
 services:
 
-  prometheus:
-    image: prom/prometheus
-    container_name: prometheus
-    restart: unless-stopped
-
-    ports:
-      - "9091:9090"
-
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-
-    networks:
-      - gluttex-net
-
-  rabbitmq:
-    image: rabbitmq:3.13-management-alpine
-    container_name: rabbitmq
-    hostname: rabbitmq
-    restart: unless-stopped
-    
-    ports:
-      - "5672:5672"   # AMQP protocol port
-      - "15672:15672" # Management UI port
-      - "15692:15692" # Prometheus metrics port (optional)
-    
-    environment:
-      # Default credentials (CHANGE THESE IN PRODUCTION!)
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-admin123}
-      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
-      
-      # Memory and disk thresholds
-      # RABBITMQ_VM_MEMORY_HIGH_WATERMARK: 0.6
-      RABBITMQ_DISK_FREE_LIMIT: 2GB
-      
-      # Erlang cookie for clustering (required for multi-node setup)
-      RABBITMQ_ERLANG_COOKIE: "super-secret-cookie-change-me"
-      
-      # Server additional configuration
-      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit log_levels [{connection,error},{default,error}] disk_free_limit 2147483648"
-    
-    volumes:
-      # Persist data
-      - rabbitmq_data:/var/lib/rabbitmq
-      - rabbitmq_logs:/var/log/rabbitmq
-      
-      # Custom configuration (optional)
-      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
-      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
-      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
-    
-    
-    healthcheck:
-      test: rabbitmq-diagnostics -q ping
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
-    
-    labels:
-      - "traefik.enable=false"
-
-
-
-    networks:
-      - gluttex-net
-
-
-
-  gluttex-web:
-    container_name: gluttex-web
-    hostname: gluttex-web
-    build:
-      context: ./landing
-    image: gluttex-web:latest
-    restart: unless-stopped
-    ports:
-      - 9070:9070
-    networks:
-      - gluttex-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 512M
-
-
-  mysql:
-    image: mysql
-    container_name: gluttex-db
-    restart: always
-    command: --max_allowed_packet=256M --init-file /data/application/init.sql
-
-    environment:
-      MYSQL_DATABASE: ${SQL_DATABASE}
-      MYSQL_USER: ${SQL_USER}
-      MYSQL_ROOT_PASSWORD: ${SQL_ROOT_PASSWORD}
-      MYSQL_PASSWORD: ${SQL_PASSWORD}
-      
-    ports:
-      - ${SQL_PORT}:3306
-    volumes:
-      - ./mysql/model.sql:/data/application/init.sql
-      - ./volumes/data:/var/lib/mysql
-    networks:
-      - gluttex-net
-  gluttex-api:
-    container_name: gluttex-api
-    hostname: gluttex-api
+  emagrad-fs:
+    container_name: emagrad-fs
+    hostname: emagrad-fs
     restart: unless-stopped
     build:
-      context: ./api_server
-      dockerfile: ./Dockerfile.dev
-      args:
-        - API_PORT=9000
-    command: uvicorn server:app --host 0.0.0.0 --port 9000 --reload
-    image: omarzos/gluttex-api
-    ports:
-      - 9000:9000
-    environment:
-      - API_PORT=9000
-      - SQL_SCHEMA=${SQL_SCHEMA}
-      - SQL_HOST=${SQL_HOST}
-      - SQL_DATABASE=${SQL_DATABASE}
-      - SQL_USER=${SQL_USER}
-      - SQL_PASSWORD=${SQL_ROOT_PASSWORD}
-      - SQL_PORT=3306
-      - AUTH_PORT=${AUTH_PORT}
-      - AUTH_SERVER_NAME=${AUTH_SERVER_NAME}
-      - AUTH_REGISTRATION_ENDPOINT=${AUTH_REGISTRATION_ENDPOINT}
-      - AUTH_LOGIN_ENDPOINT=${AUTH_LOGIN_ENDPOINT}
-      - AUTH_DELETE_ENDPOINT=${AUTH_DELETE_ENDPOINT}
-      - ALGORITHM=${ALGORITHM}
-      - API_SECRET_KEY=${SECRET_KEY}
-      - AUTH_CHANGE_ENDPOINT=${AUTH_CHANGE_ENDPOINT}
-      - FILE_UPLOAD_ENDPOINT=${FILE_UPLOAD_ENDPOINT}
-      - FS_HOST=${FS_HOST}
-      - FS_PORT=${FS_PORT}
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - RABBITMQ_HOST=${RABBITMQ_HOST}
-      - RABBITMQ_PORT=${RABBITMQ_PORT}
-      - RABBITMQ_USER=${RABBITMQ_USER}
-      - RABBITMQ_PASS=${RABBITMQ_PASS}
-      - RABBITMQ_VHOST=${RABBITMQ_VHOST}
-      
-    networks:
-      - gluttex-net
-    volumes:
-      - ./api_server:/code
-    
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 512M
-  
-  gluttex-auth:
-    container_name: gluttex-auth
-    hostname: gluttex-auth
-    restart: unless-stopped
-    build:
-      context: ./auth_server
-      dockerfile: ./Dockerfile.dev
-      args:
-        - AUTH_PORT=9090
-    command: uvicorn server:app --host 0.0.0.0 --ssl-keyfile /etc/ssl/private/key.pem --ssl-certfile /etc/ssl/certs/cert.pem --port 9090 --reload # 
-    image: omarzos/gluttex-auth
-    environment:
-      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES}
-      - AUTH_PORT=9090
-      - API_SECRET_KEY=${SECRET_KEY}
-      - API_ALGORITHM=${ALGORITHM}
-      - AUTH_DATABASE_URL=sqlite:///../auth_db/auth_db_data.db
-    ports:
-      - 9090:9090
-    networks:
-      - gluttex-net
-    volumes:
-      - ./auth_server/:/code
-      - ./volumes/auth_db/:/auth_db/
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
-
-  gluttex-fs:
-    container_name: gluttex-fs
-    hostname: gluttex-fs
-    restart: unless-stopped
-    build:
-      context: ./file_server
-      dockerfile: ./Dockerfile.dev
+      context: ./
+      # dockerfile: ./Dockerfile.dev
+      dockerfile: ./Dockerfile
       args:
         - FS_PORT=9099
-    command: uvicorn server:app --host 0.0.0.0 --port 9099 --reload
-    image: omarzos/gluttex-fs
+    # command: uvicorn server:app --host 0.0.0.0 --port 9099 --reload
+    image: omarzos/emagrad-fs
     ports:
       - 9099:9099
     environment:
       - FS_PORT=9099
       - FS_BASE_STORAGE=${FS_BASE_STORAGE}
       - FS_CACHE_STORAGE=${FS_CACHE_STORAGE}
-    networks:
-      - gluttex-net
+    # networks:
+    #   - gluttex-net
     volumes:
-      - ./file_server/:/code
+      - ./:/code
       - ./volumes/fs/:/fs/
     deploy:
       resources:
@@ -220,39 +33,13 @@ services:
           cpus: '0.5'
           memory: 512M
 
-  gluttex-stream:
-    container_name: gluttex-stream
-    hostname: gluttex-stream
-    restart: unless-stopped
-    build:
-      context: ./stream_server
-      dockerfile: ./Dockerfile
-    command: uvicorn server:app --host 0.0.0.0 --port 9097 --reload
-    image: omarzos/gluttex-stream
-    ports:
-      - 9097:9097
-    environment:
-      - FS_PORT=9097
-    volumes:
-      - ./stream_server/:/code
-    networks:
-      - gluttex-net
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
 
 volumes:
-  rabbitmq_data:
-    driver: local
-  rabbitmq_logs:
-    driver: local
   volumes:
     driver: local
 
 
-networks:
-  gluttex-net:
-    name: gluttex-net
-    driver: bridge
+# networks:
+#   gluttex-net:
+#     name: gluttex-net
+#     driver: bridge
