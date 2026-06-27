@@ -401,4 +401,4 @@ This project is proprietary — © Verdelia. All rights reserved.
 
 ---
 
-**Emagrad — The Archive of Verdelia** 📂
+**Emagrad — The Archive of Verdelia** 📂# finance-api
