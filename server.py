@@ -69,5 +69,5 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(order_router, prefix="/order", tags=["Payment routes"])
-app.include_router(service_router, prefix="/service", tags=["Payment routes"])
+app.include_router(order_router, prefix="/order")
+app.include_router(service_router, prefix="/service")
