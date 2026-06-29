@@ -12,8 +12,9 @@ from contextlib import asynccontextmanager
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from core.schemas.payment_schemas import API_Resolution
-from lib.order_router import router as order_router
-from lib.service_order_router import router as service_router
+# from lib.order_router import router as order_router
+# from lib.service_order_router import router as service_router
+from lib.inventory_router import router as inventory_router
 
 
 app = FastAPI(
@@ -69,5 +70,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(order_router, prefix="/order")
-app.include_router(service_router, prefix="/service")
+app.include_router(inventory_router, prefix="/esilo/inventory")
