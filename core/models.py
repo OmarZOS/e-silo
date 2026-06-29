@@ -265,8 +265,10 @@ class Product(Base):
     last_updated = Column(DateTime, server_default=text('CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'))
     created = Column(TIMESTAMP, server_default=text('CURRENT_TIMESTAMP'))
     product_description = Column(String(300))
-    product_price = Column(Float(asdecimal=True))
-    product_quantity = Column(Integer)
+    product_price = Column(Float(asdecimal=True), server_default=text("'0'"))
+    product_base_price = Column(Float(asdecimal=True), server_default=text("'0'"))
+    product_quantity = Column(Integer, server_default=text("'0'"))
+    product_reserved_quantity = Column(Integer, server_default=text("'0'"))
     product_quantifier = Column(String(45))
     product_owner = Column(Integer)
     product_origin_id = Column(Integer)
@@ -280,6 +282,7 @@ class Product(Base):
     product_image = relationship('ProductImage', back_populates='product_ref')
     product_reaction = relationship('ProductReaction', back_populates='product')
     service_resource_requirement = relationship('ServiceResourceRequirement', back_populates='product')
+    product_consumption = relationship('ProductConsumption', back_populates='consumed_product')
 
 
 class ProvidedService(Base):
@@ -397,6 +400,7 @@ class OrderedService(Base):
 
     ordered_service_cart = relationship('Cart', back_populates='ordered_service')
     ordered_service_service = relationship('ProvidedService', back_populates='ordered_service')
+    product_consumption = relationship('ProductConsumption', back_populates='consuming_service')
 
 
 
@@ -479,6 +483,7 @@ class ServiceResourceRequirement(Base):
 
     product = relationship('Product', back_populates='service_resource_requirement')
     service_resource_requirement_service = relationship('ProvidedService', back_populates='service_resource_requirement')
+    product_consumption = relationship('ProductConsumption', back_populates='service_resource_requirement')
 
 
 class ServiceStaffRequirement(Base):
@@ -503,3 +508,24 @@ class ServiceStaffRequirement(Base):
 
     staff_role = relationship('StaffRole', back_populates='service_staff_requirement')
     service_staff_requirement_service = relationship('ProvidedService', back_populates='service_staff_requirement')
+
+
+class ProductConsumption(Base):
+    __tablename__ = 'product_consumption'
+    __table_args__ = (
+        ForeignKeyConstraint(['consumed_product_id'], ['product.id_product'], name='fk_product_consumption_product1'),
+        ForeignKeyConstraint(['consuming_service_id'], ['ordered_service.ordered_service_id'], name='fk_product_consumption_ordered_service1'),
+        ForeignKeyConstraint(['resource_req_ref'], ['service_resource_requirement.service_resource_requirement_id'], name='fk_product_consumption_service_resource_requirement1'),
+        Index('fk_product_consumption_ordered_service1_idx', 'consuming_service_id'),
+        Index('fk_product_consumption_product1_idx', 'consumed_product_id'),
+        Index('fk_product_consumption_service_resource_requirement1_idx', 'resource_req_ref')
+    )
+
+    resource_req_ref = Column(Integer, primary_key=True, nullable=False)
+    consuming_service_id = Column(Integer, primary_key=True, nullable=False)
+    consumed_product_id = Column(Integer, primary_key=True, nullable=False)
+    product_reserved_quantity = Column(Integer)
+
+    consumed_product = relationship('Product', back_populates='product_consumption')
+    consuming_service = relationship('OrderedService', back_populates='product_consumption')
+    service_resource_requirement = relationship('ServiceResourceRequirement', back_populates='product_consumption')
