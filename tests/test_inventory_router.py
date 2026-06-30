@@ -162,7 +162,11 @@ def test_health_check(client: InventoryTestClient):
     result = client.health_check()
     
     if result['status_code'] == 200:
-        logger.info(f"✅ Health check passed: {result['data']}")
+        data = result['data']
+        logger.info(f"✅ Health check passed")
+        logger.info(f"   Status: {data.get('status')}")
+        logger.info(f"   Service: {data.get('service')}")
+        logger.info(f"   Database: {data.get('database')}")
     else:
         logger.error(f"❌ Health check failed: {result.get('error', 'Unknown error')}")
     
@@ -194,6 +198,8 @@ def test_get_stock_status(client: InventoryTestClient):
             logger.info(f"   Reserved: {data.get('reserved_quantity')}")
             logger.info(f"   Available: {data.get('available_quantity')}")
             logger.info(f"   Version: {data.get('version')}")
+        elif result['status_code'] == 404:
+            logger.warning(f"⚠️ Product {product_id} not found")
         else:
             logger.error(f"❌ Failed to get stock status: {result.get('error', 'Unknown error')}")
     
@@ -230,11 +236,8 @@ def test_reserve_ordered_items(client: InventoryTestClient):
     
     # Test cases - reserve quantities for various ordered items
     test_cases = [
-        # Ordered item 1 (Surgical Masks) - reserve 50
         {'id': 1, 'quantity': 50},
-        # Ordered item 2 (Nitrile Gloves) - reserve 20
         {'id': 2, 'quantity': 20},
-        # Ordered item 7 (Paracetamol) - reserve 10
         {'id': 7, 'quantity': 10},
     ]
     
@@ -253,6 +256,9 @@ def test_reserve_ordered_items(client: InventoryTestClient):
         
         for item in data.get('failed_items', []):
             logger.info(f"   ❌ Failed: {item.get('reason')}")
+    elif result['status_code'] == 404:
+        logger.error(f"❌ Reservation failed: Items not found")
+        logger.error(f"   Detail: {result['data'].get('detail')}")
     else:
         logger.error(f"❌ Reservation failed: {result.get('error', 'Unknown error')}")
     
@@ -267,11 +273,8 @@ def test_reserve_consumptions(client: InventoryTestClient):
     
     # Test cases - reserve quantities for various consumptions
     test_cases = [
-        # Consumption 1 (Surgical Masks) - reserve 100
         {'id': 1, 'quantity': 100},
-        # Consumption 2 (Nitrile Gloves) - reserve 30
         {'id': 2, 'quantity': 30},
-        # Consumption 3 (Isopropyl Alcohol) - reserve 20
         {'id': 3, 'quantity': 20},
     ]
     
@@ -306,7 +309,7 @@ def test_check_and_reserve(client: InventoryTestClient):
     test_cases = [
         {'id': 1, 'quantity': 10},
         {'id': 2, 'quantity': 5},
-        {'id': 999, 'quantity': 1},  # Non-existent item - should fail
+        {'id': 999, 'quantity': 1},  # Non-existent item - should fail with 404
     ]
     
     logger.info(f"Checking and reserving: {test_cases}")
@@ -317,13 +320,23 @@ def test_check_and_reserve(client: InventoryTestClient):
         logger.info(f"✅ Check and reserve result:")
         logger.info(f"   Overall success: {data.get('success')}")
         
+        # Check each item result
         for item in data.get('items', []):
-            status = "✅" if item.get('success') else "❌"
-            logger.info(f"   {status} Item {item.get('id')}: {item.get('reason', 'Success')}")
+            item_id = item.get('id')
+            success = item.get('success')
+            reason = item.get('reason', 'Success')
+            status = "✅" if success else "❌"
+            logger.info(f"   {status} Item {item_id}: {reason}")
+        
+        return result
+    elif result['status_code'] == 404:
+        data = result['data']
+        logger.info(f"✅ Check and reserve correctly returned 404")
+        logger.info(f"   Detail: {data.get('detail')}")
+        return result
     else:
         logger.error(f"❌ Check and reserve failed: {result.get('error', 'Unknown error')}")
-    
-    return result
+        return result
 
 
 def test_confirm_ordered_items(client: InventoryTestClient):
@@ -437,9 +450,11 @@ def test_bulk_operations(client: InventoryTestClient):
         logger.info(f"   Overall success: {data.get('overall_success')}")
         
         if data.get('ordered_items'):
-            logger.info(f"   Ordered items success: {data['ordered_items'].get('success_count')}/{data['ordered_items'].get('success_count') + data['ordered_items'].get('failed_count')}")
+            ordered = data['ordered_items']
+            logger.info(f"   Ordered items success: {ordered.get('success_count')}/{ordered.get('success_count') + ordered.get('failed_count')}")
         if data.get('consumptions'):
-            logger.info(f"   Consumptions success: {data['consumptions'].get('success_count')}/{data['consumptions'].get('success_count') + data['consumptions'].get('failed_count')}")
+            cons = data['consumptions']
+            logger.info(f"   Consumptions success: {cons.get('success_count')}/{cons.get('success_count') + cons.get('failed_count')}")
     else:
         logger.error(f"❌ Bulk reserve failed: {result.get('error', 'Unknown error')}")
     
@@ -463,9 +478,7 @@ def test_insufficient_stock_scenario(client: InventoryTestClient):
     logger.info("TEST: Insufficient Stock Scenario")
     logger.info("="*60)
     
-    # Try to reserve more than available for a product
-    # Product 1 has 5000 stock, so this should be fine
-    # But we'll try to reserve 6000 to test failure
+    # Try to reserve more than available
     test_cases = [
         {'id': 1, 'quantity': 6000},  # Product 1 only has 5000
     ]
@@ -475,7 +488,7 @@ def test_insufficient_stock_scenario(client: InventoryTestClient):
     
     if result['status_code'] == 200:
         data = result['data']
-        if data.get('success_count') == 0:
+        if data.get('success_count') == 0 and data.get('failed_count') == 1:
             logger.info(f"✅ Correctly failed due to insufficient stock")
             logger.info(f"   Reason: {data.get('failed_items', [{}])[0].get('reason')}")
         else:
@@ -486,35 +499,72 @@ def test_insufficient_stock_scenario(client: InventoryTestClient):
     return result
 
 
-def test_invalid_scenarios(client: InventoryTestClient):
-    """Test invalid scenarios"""
+def test_non_existent_item_scenario(client: InventoryTestClient):
+    """Test non-existent item scenario"""
     logger.info("\n" + "="*60)
-    logger.info("TEST: Invalid Scenarios")
+    logger.info("TEST: Non-existent Item Scenario")
     logger.info("="*60)
     
-    # Test 1: Non-existent ordered item
+    # Try to reserve a non-existent ordered item
     logger.info("\n1. Testing non-existent ordered item...")
     result = client.reserve_inventory([{'id': 999, 'quantity': 1}], 'ordered_item')
-    if result['status_code'] == 200:
-        data = result['data']
-        if data.get('failed_count') == 1:
-            logger.info("✅ Correctly failed for non-existent item")
-        else:
-            logger.warning(f"⚠️ Unexpected result: {data}")
     
-    # Test 2: Negative quantity (should be caught by validation)
-    logger.info("\n2. Testing negative quantity...")
+    if result['status_code'] == 404:
+        data = result['data']
+        logger.info(f"✅ Correctly returned 404")
+        logger.info(f"   Detail: {data.get('detail')}")
+    else:
+        logger.warning(f"⚠️ Expected 404, got {result['status_code']}")
+    
+    # Try to reserve a non-existent consumption
+    logger.info("\n2. Testing non-existent consumption...")
+    result = client.reserve_inventory([{'id': 999, 'quantity': 1}], 'consumption')
+    
+    if result['status_code'] == 404:
+        data = result['data']
+        logger.info(f"✅ Correctly returned 404")
+        logger.info(f"   Detail: {data.get('detail')}")
+    else:
+        logger.warning(f"⚠️ Expected 404, got {result['status_code']}")
+    
+    return result
+
+
+def test_validation_scenarios(client: InventoryTestClient):
+    """Test validation scenarios"""
+    logger.info("\n" + "="*60)
+    logger.info("TEST: Validation Scenarios")
+    logger.info("="*60)
+    
+    # Test 1: Negative quantity (should be caught by validation)
+    logger.info("\n1. Testing negative quantity...")
     result = client.reserve_inventory([{'id': 1, 'quantity': -5}], 'ordered_item')
     if result['status_code'] == 422 or result['status_code'] == 400:
         logger.info(f"✅ Correctly rejected negative quantity (HTTP {result['status_code']})")
     else:
         logger.warning(f"⚠️ Unexpected status code: {result['status_code']}")
     
-    # Test 3: Invalid item_type
-    logger.info("\n3. Testing invalid item_type...")
+    # Test 2: Invalid item_type
+    logger.info("\n2. Testing invalid item_type...")
     result = client.reserve_inventory([{'id': 1, 'quantity': 5}], 'invalid_type')
     if result['status_code'] == 422 or result['status_code'] == 400:
         logger.info(f"✅ Correctly rejected invalid item_type (HTTP {result['status_code']})")
+    else:
+        logger.warning(f"⚠️ Unexpected status code: {result['status_code']}")
+    
+    # Test 3: Zero quantity
+    logger.info("\n3. Testing zero quantity...")
+    result = client.reserve_inventory([{'id': 1, 'quantity': 0}], 'ordered_item')
+    if result['status_code'] == 422 or result['status_code'] == 400:
+        logger.info(f"✅ Correctly rejected zero quantity (HTTP {result['status_code']})")
+    else:
+        logger.warning(f"⚠️ Unexpected status code: {result['status_code']}")
+    
+    # Test 4: Empty items list
+    logger.info("\n4. Testing empty items list...")
+    result = client.reserve_inventory([], 'ordered_item')
+    if result['status_code'] == 422 or result['status_code'] == 400:
+        logger.info(f"✅ Correctly rejected empty items list (HTTP {result['status_code']})")
     else:
         logger.warning(f"⚠️ Unexpected status code: {result['status_code']}")
     
@@ -560,7 +610,8 @@ def run_all_tests():
     
     # 7. Edge Cases
     results['insufficient'] = test_insufficient_stock_scenario(client)
-    results['invalid'] = test_invalid_scenarios(client)
+    results['non_existent'] = test_non_existent_item_scenario(client)
+    results['validation'] = test_validation_scenarios(client)
     
     # 8. Summary
     logger.info("\n" + "="*60)
@@ -646,5 +697,3 @@ if __name__ == "__main__":
         logger.error(f"\n❌ Test execution failed: {e}")
         import traceback
         traceback.print_exc()
-
-

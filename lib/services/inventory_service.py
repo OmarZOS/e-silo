@@ -7,10 +7,10 @@ import logging
 from lib.repositories.inventory_repository import InventoryRepository
 from lib.repositories.ordered_item_repository import OrderedItemRepository
 from lib.repositories.product_consumption_repository import ProductConsumptionRepository
-from core.transaction import transactional
+from core.transaction import transactional, handle_db_errors
 from core.exceptions.handler import APIException
 from core.exceptions.error_codes import ErrorCode
-from core.exceptions.http_status import HTTP_409_CONFLICT
+from core.exceptions.http_status import HTTP_409_CONFLICT, HTTP_404_NOT_FOUND
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +18,6 @@ logger = logging.getLogger(__name__)
 class InventoryService:
     """
     High-performance inventory service using atomic updates.
-    
-    Key principles:
-    1. All inventory operations are single SQL UPDATE statements
-    2. No SELECT ... FOR UPDATE (contention-heavy)
-    3. Aggregate reserved_quantity maintained in Product table
-    4. OrderedItem/ProductConsumption for detailed audit trail
     """
     
     def __init__(self, session: Session):
@@ -34,27 +28,17 @@ class InventoryService:
     
     # ==================== RESERVATION OPERATIONS ====================
     
-    @transactional
-    def reserve_for_ordered_items(self, 
-                                 items: List[Dict[str, int]],
-                                 session: Session = None) -> Dict[str, Any]:
+    @handle_db_errors
+    def reserve_for_ordered_items(self, items: List[Dict[str, int]]) -> Dict[str, Any]:
         """
         Reserve inventory for ordered items.
-        
-        Args:
-            items: List of dicts with 'ordered_item_id' and 'quantity'
-            session: SQLAlchemy session (injected by transactional decorator)
-            
-        Returns:
-            Dict with reservation results
+        Raises 404 if any ordered item is not found.
         """
-        if session is None:
-            session = self.session
-        
         success_items = []
         failed_items = []
+        not_found_items = []
         
-        # First, get all ordered items to know which products to reserve
+        # Get all ordered items to know which products to reserve
         ordered_item_ids = [item['ordered_item_id'] for item in items]
         ordered_items = []
         
@@ -62,6 +46,16 @@ class InventoryService:
             ordered_item = self.ordered_item_repo.get_by_id(item_id)
             if ordered_item:
                 ordered_items.append(ordered_item)
+            else:
+                not_found_items.append(item_id)
+        
+        # If any items not found, raise 404
+        if not_found_items:
+            raise APIException(
+                status_code=HTTP_404_NOT_FOUND,
+                error_code=ErrorCode.DATA_ERROR,
+                message=f"Ordered items not found: {', '.join(map(str, not_found_items))}"
+            )
         
         # Map ordered_item_id -> product_id
         product_map = {
@@ -79,7 +73,7 @@ class InventoryService:
             if not product_id:
                 failed_items.append({
                     'ordered_item_id': ordered_item_id,
-                    'reason': 'Ordered item not found or has no product'
+                    'reason': 'Ordered item has no product'
                 })
                 continue
             
@@ -101,10 +95,9 @@ class InventoryService:
                 # Update ordered_item to reflect reserved quantity
                 ordered_item = self.ordered_item_repo.get_by_id(inv_item['ordered_item_id'])
                 if ordered_item:
-                    # Store reserved quantity in ordered_item for audit
-                    ordered_item.ordered_reserved_quantity = inv_item['quantity']
+                    ordered_item.reserved_quantity = inv_item['quantity']
                     ordered_item.ordered_item_delivery_status = 'processing'
-                    session.add(ordered_item)
+                    self.session.add(ordered_item)
                 
                 success_items.append({
                     'ordered_item_id': inv_item['ordered_item_id'],
@@ -120,6 +113,8 @@ class InventoryService:
                 })
                 results[inv_item['ordered_item_id']] = False
         
+        self.session.commit()
+        
         return {
             'success': len(failed_items) == 0,
             'success_count': len(success_items),
@@ -129,25 +124,15 @@ class InventoryService:
             'results': results
         }
     
-    @transactional
-    def reserve_for_consumptions(self,
-                                items: List[Dict[str, int]],
-                                session: Session = None) -> Dict[str, Any]:
+    @handle_db_errors
+    def reserve_for_consumptions(self, items: List[Dict[str, int]]) -> Dict[str, Any]:
         """
         Reserve inventory for product consumptions (services).
-        
-        Args:
-            items: List of dicts with 'consumption_id' and 'quantity'
-            session: SQLAlchemy session (injected by transactional decorator)
-            
-        Returns:
-            Dict with reservation results
+        Raises 404 if any consumption is not found.
         """
-        if session is None:
-            session = self.session
-        
         success_items = []
         failed_items = []
+        not_found_items = []
         
         # Get all consumptions
         consumption_ids = [item['consumption_id'] for item in items]
@@ -157,6 +142,16 @@ class InventoryService:
             consumption = self.consumption_repo.get_by_id(consumption_id)
             if consumption:
                 consumptions.append(consumption)
+            else:
+                not_found_items.append(consumption_id)
+        
+        # If any items not found, raise 404
+        if not_found_items:
+            raise APIException(
+                status_code=HTTP_404_NOT_FOUND,
+                error_code=ErrorCode.DATA_ERROR,
+                message=f"Consumptions not found: {', '.join(map(str, not_found_items))}"
+            )
         
         # Map consumption_id -> product_id
         product_map = {
@@ -174,7 +169,7 @@ class InventoryService:
             if not product_id:
                 failed_items.append({
                     'consumption_id': consumption_id,
-                    'reason': 'Consumption not found or has no product'
+                    'reason': 'Consumption has no product'
                 })
                 continue
             
@@ -197,7 +192,7 @@ class InventoryService:
                 consumption = self.consumption_repo.get_by_id(inv_item['consumption_id'])
                 if consumption:
                     consumption.product_reserved_quantity = inv_item['quantity']
-                    session.add(consumption)
+                    self.session.add(consumption)
                 
                 success_items.append({
                     'consumption_id': inv_item['consumption_id'],
@@ -213,6 +208,8 @@ class InventoryService:
                 })
                 results[inv_item['consumption_id']] = False
         
+        self.session.commit()
+        
         return {
             'success': len(failed_items) == 0,
             'success_count': len(success_items),
@@ -222,21 +219,17 @@ class InventoryService:
             'results': results
         }
     
-    # ==================== CONFIRMATION (DEDUCTION) OPERATIONS ====================
+    # ==================== CONFIRMATION OPERATIONS ====================
     
-    @transactional
-    def confirm_ordered_items(self,
-                             items: List[Dict[str, int]],
-                             session: Session = None) -> Dict[str, Any]:
+    @handle_db_errors
+    def confirm_ordered_items(self, items: List[Dict[str, int]]) -> Dict[str, Any]:
         """
-        Confirm reservations for ordered items (move from reserved to stock).
-        Called when payment succeeds.
+        Confirm reservations for ordered items.
+        Raises 404 if any ordered item is not found.
         """
-        if session is None:
-            session = self.session
-        
         success_items = []
         failed_items = []
+        not_found_items = []
         
         # Get ordered items
         ordered_item_ids = [item['ordered_item_id'] for item in items]
@@ -246,6 +239,16 @@ class InventoryService:
             ordered_item = self.ordered_item_repo.get_by_id(item_id)
             if ordered_item:
                 ordered_items.append(ordered_item)
+            else:
+                not_found_items.append(item_id)
+        
+        # If any items not found, raise 404
+        if not_found_items:
+            raise APIException(
+                status_code=HTTP_404_NOT_FOUND,
+                error_code=ErrorCode.DATA_ERROR,
+                message=f"Ordered items not found: {', '.join(map(str, not_found_items))}"
+            )
         
         # Map ordered_item_id -> product_id
         product_map = {
@@ -261,19 +264,18 @@ class InventoryService:
             if not product_id:
                 failed_items.append({
                     'ordered_item_id': ordered_item_id,
-                    'reason': 'Ordered item not found'
+                    'reason': 'Ordered item has no product'
                 })
                 continue
             
-            # Confirm reservation (atomic update)
             success = self.inventory_repo.confirm_reservation(product_id, quantity)
             
             if success:
-                # Update ordered item status
                 ordered_item = self.ordered_item_repo.get_by_id(ordered_item_id)
                 if ordered_item:
                     ordered_item.ordered_item_delivery_status = 'delivered'
-                    session.add(ordered_item)
+                    ordered_item.reserved_quantity = 0
+                    self.session.add(ordered_item)
                 
                 success_items.append({
                     'ordered_item_id': ordered_item_id,
@@ -287,6 +289,8 @@ class InventoryService:
                     'reason': 'Failed to confirm reservation'
                 })
         
+        self.session.commit()
+        
         return {
             'success': len(failed_items) == 0,
             'success_count': len(success_items),
@@ -295,19 +299,15 @@ class InventoryService:
             'failed_items': failed_items
         }
     
-    @transactional
-    def confirm_consumptions(self,
-                            items: List[Dict[str, int]],
-                            session: Session = None) -> Dict[str, Any]:
+    @handle_db_errors
+    def confirm_consumptions(self, items: List[Dict[str, int]]) -> Dict[str, Any]:
         """
-        Confirm reservations for consumptions (move from reserved to stock).
-        Called when service is completed.
+        Confirm reservations for consumptions.
+        Raises 404 if any consumption is not found.
         """
-        if session is None:
-            session = self.session
-        
         success_items = []
         failed_items = []
+        not_found_items = []
         
         # Get consumptions
         consumption_ids = [item['consumption_id'] for item in items]
@@ -317,6 +317,16 @@ class InventoryService:
             consumption = self.consumption_repo.get_by_id(consumption_id)
             if consumption:
                 consumptions.append(consumption)
+            else:
+                not_found_items.append(consumption_id)
+        
+        # If any items not found, raise 404
+        if not_found_items:
+            raise APIException(
+                status_code=HTTP_404_NOT_FOUND,
+                error_code=ErrorCode.DATA_ERROR,
+                message=f"Consumptions not found: {', '.join(map(str, not_found_items))}"
+            )
         
         # Map consumption_id -> product_id
         product_map = {
@@ -332,7 +342,7 @@ class InventoryService:
             if not product_id:
                 failed_items.append({
                     'consumption_id': consumption_id,
-                    'reason': 'Consumption not found'
+                    'reason': 'Consumption has no product'
                 })
                 continue
             
@@ -342,7 +352,7 @@ class InventoryService:
                 consumption = self.consumption_repo.get_by_id(consumption_id)
                 if consumption:
                     consumption.product_reserved_quantity = 0
-                    session.add(consumption)
+                    self.session.add(consumption)
                 
                 success_items.append({
                     'consumption_id': consumption_id,
@@ -355,6 +365,8 @@ class InventoryService:
                     'product_id': product_id,
                     'reason': 'Failed to confirm reservation'
                 })
+        
+        self.session.commit()
         
         return {
             'success': len(failed_items) == 0,
@@ -366,18 +378,15 @@ class InventoryService:
     
     # ==================== RELEASE OPERATIONS ====================
     
-    @transactional
-    def release_ordered_items(self,
-                             items: List[Dict[str, int]],
-                             session: Session = None) -> Dict[str, Any]:
+    @handle_db_errors
+    def release_ordered_items(self, items: List[Dict[str, int]]) -> Dict[str, Any]:
         """
-        Release reservations for ordered items (when order is cancelled).
+        Release reservations for ordered items.
+        Raises 404 if any ordered item is not found.
         """
-        if session is None:
-            session = self.session
-        
         success_items = []
         failed_items = []
+        not_found_items = []
         
         # Get ordered items
         ordered_item_ids = [item['ordered_item_id'] for item in items]
@@ -387,6 +396,16 @@ class InventoryService:
             ordered_item = self.ordered_item_repo.get_by_id(item_id)
             if ordered_item:
                 ordered_items.append(ordered_item)
+            else:
+                not_found_items.append(item_id)
+        
+        # If any items not found, raise 404
+        if not_found_items:
+            raise APIException(
+                status_code=HTTP_404_NOT_FOUND,
+                error_code=ErrorCode.DATA_ERROR,
+                message=f"Ordered items not found: {', '.join(map(str, not_found_items))}"
+            )
         
         # Map ordered_item_id -> product_id
         product_map = {
@@ -402,7 +421,7 @@ class InventoryService:
             if not product_id:
                 failed_items.append({
                     'ordered_item_id': ordered_item_id,
-                    'reason': 'Ordered item not found'
+                    'reason': 'Ordered item has no product'
                 })
                 continue
             
@@ -412,8 +431,8 @@ class InventoryService:
                 ordered_item = self.ordered_item_repo.get_by_id(ordered_item_id)
                 if ordered_item:
                     ordered_item.ordered_item_delivery_status = 'cancelled'
-                    ordered_item.ordered_reserved_quantity = 0
-                    session.add(ordered_item)
+                    ordered_item.reserved_quantity = 0
+                    self.session.add(ordered_item)
                 
                 success_items.append({
                     'ordered_item_id': ordered_item_id,
@@ -427,6 +446,8 @@ class InventoryService:
                     'reason': 'Failed to release reservation'
                 })
         
+        self.session.commit()
+        
         return {
             'success': len(failed_items) == 0,
             'success_count': len(success_items),
@@ -435,18 +456,15 @@ class InventoryService:
             'failed_items': failed_items
         }
     
-    @transactional
-    def release_consumptions(self,
-                            items: List[Dict[str, int]],
-                            session: Session = None) -> Dict[str, Any]:
+    @handle_db_errors
+    def release_consumptions(self, items: List[Dict[str, int]]) -> Dict[str, Any]:
         """
-        Release reservations for consumptions (when service is cancelled).
+        Release reservations for consumptions.
+        Raises 404 if any consumption is not found.
         """
-        if session is None:
-            session = self.session
-        
         success_items = []
         failed_items = []
+        not_found_items = []
         
         # Get consumptions
         consumption_ids = [item['consumption_id'] for item in items]
@@ -456,6 +474,16 @@ class InventoryService:
             consumption = self.consumption_repo.get_by_id(consumption_id)
             if consumption:
                 consumptions.append(consumption)
+            else:
+                not_found_items.append(consumption_id)
+        
+        # If any items not found, raise 404
+        if not_found_items:
+            raise APIException(
+                status_code=HTTP_404_NOT_FOUND,
+                error_code=ErrorCode.DATA_ERROR,
+                message=f"Consumptions not found: {', '.join(map(str, not_found_items))}"
+            )
         
         # Map consumption_id -> product_id
         product_map = {
@@ -471,7 +499,7 @@ class InventoryService:
             if not product_id:
                 failed_items.append({
                     'consumption_id': consumption_id,
-                    'reason': 'Consumption not found'
+                    'reason': 'Consumption has no product'
                 })
                 continue
             
@@ -481,7 +509,7 @@ class InventoryService:
                 consumption = self.consumption_repo.get_by_id(consumption_id)
                 if consumption:
                     consumption.product_reserved_quantity = 0
-                    session.add(consumption)
+                    self.session.add(consumption)
                 
                 success_items.append({
                     'consumption_id': consumption_id,
@@ -495,6 +523,8 @@ class InventoryService:
                     'reason': 'Failed to release reservation'
                 })
         
+        self.session.commit()
+        
         return {
             'success': len(failed_items) == 0,
             'success_count': len(success_items),
@@ -505,15 +535,18 @@ class InventoryService:
     
     # ==================== BATCH OPERATIONS ====================
     
+    @handle_db_errors
     def check_and_reserve(self, items: List[Dict[str, int]], item_type: str) -> Dict[str, Any]:
         """
         Check availability and reserve in one go.
-        Returns detailed results for each item.
+        Raises 404 if any item is not found.
         """
         results = {
             'success': True,
             'items': []
         }
+        
+        not_found_items = []
         
         for item in items:
             item_result = {
@@ -531,6 +564,7 @@ class InventoryService:
                     product_id = ordered_item.ordered_product_id
                     item_result['product_id'] = product_id
                 else:
+                    not_found_items.append(item['id'])
                     item_result['reason'] = 'Ordered item not found'
                     results['items'].append(item_result)
                     results['success'] = False
@@ -541,6 +575,7 @@ class InventoryService:
                     product_id = consumption.consumed_product_id
                     item_result['product_id'] = product_id
                 else:
+                    not_found_items.append(item['id'])
                     item_result['reason'] = 'Consumption not found'
                     results['items'].append(item_result)
                     results['success'] = False
@@ -562,6 +597,7 @@ class InventoryService:
                 if item_type == 'ordered_item':
                     ordered_item = self.ordered_item_repo.get_by_id(item['id'])
                     if ordered_item:
+                        ordered_item.reserved_quantity = item['quantity']
                         ordered_item.ordered_item_delivery_status = 'processing'
                         self.session.add(ordered_item)
                 else:
@@ -575,7 +611,15 @@ class InventoryService:
             
             results['items'].append(item_result)
         
-        self.session.flush()
+        # If any items not found, raise 404
+        if not_found_items:
+            raise APIException(
+                status_code=HTTP_404_NOT_FOUND,
+                error_code=ErrorCode.DATA_ERROR,
+                message=f"Items not found: {', '.join(map(str, not_found_items))}"
+            )
+        
+        self.session.commit()
         return results
     
     # ==================== QUERY OPERATIONS ====================
@@ -591,3 +635,184 @@ class InventoryService:
     def get_inventory_summary(self, product_id: int) -> Optional[Dict[str, Any]]:
         """Get detailed inventory summary"""
         return self.inventory_repo.get_inventory(product_id)
+    
+    @handle_db_errors
+    def bulk_confirm_atomic(self, 
+                            ordered_items: List[Dict[str, int]], 
+                            consumptions: List[Dict[str, int]]) -> Dict[str, Any]:
+        """
+        ATOMIC bulk confirmation - ALL items must succeed or NONE will be confirmed.
+        This ensures data consistency for combined product and service orders.
+        """
+        # Collect all items to check
+        all_items = []
+        ordered_item_map = {}
+        consumption_map = {}
+        
+        # Prepare ordered items
+        for item in ordered_items:
+            ordered_item_id = item['ordered_item_id']
+            quantity = item['quantity']
+            ordered_item = self.ordered_item_repo.get_by_id(ordered_item_id)
+            
+            if not ordered_item:
+                raise APIException(
+                    status_code=HTTP_404_NOT_FOUND,
+                    error_code=ErrorCode.DATA_ERROR,
+                    message=f"Ordered item {ordered_item_id} not found"
+                )
+            
+            product_id = ordered_item.ordered_product_id
+            if not product_id:
+                raise APIException(
+                    status_code=HTTP_404_NOT_FOUND,
+                    error_code=ErrorCode.DATA_ERROR,
+                    message=f"Ordered item {ordered_item_id} has no product"
+                )
+            
+            ordered_item_map[ordered_item_id] = {
+                'product_id': product_id,
+                'quantity': quantity,
+                'ordered_item': ordered_item
+            }
+            all_items.append({
+                'type': 'ordered_item',
+                'id': ordered_item_id,
+                'product_id': product_id,
+                'quantity': quantity
+            })
+        
+        # Prepare consumptions
+        for item in consumptions:
+            consumption_id = item['consumption_id']
+            quantity = item['quantity']
+            consumption = self.consumption_repo.get_by_id(consumption_id)
+            
+            if not consumption:
+                raise APIException(
+                    status_code=HTTP_404_NOT_FOUND,
+                    error_code=ErrorCode.DATA_ERROR,
+                    message=f"Consumption {consumption_id} not found"
+                )
+            
+            product_id = consumption.consumed_product_id
+            if not product_id:
+                raise APIException(
+                    status_code=HTTP_404_NOT_FOUND,
+                    error_code=ErrorCode.DATA_ERROR,
+                    message=f"Consumption {consumption_id} has no product"
+                )
+            
+            consumption_map[consumption_id] = {
+                'product_id': product_id,
+                'quantity': quantity,
+                'consumption': consumption
+            }
+            all_items.append({
+                'type': 'consumption',
+                'id': consumption_id,
+                'product_id': product_id,
+                'quantity': quantity
+            })
+        
+        # If no items, return error
+        if not all_items:
+            raise ValueError("No items to confirm")
+        
+        # Start a database transaction
+        try:
+            # STEP 1: Verify ALL items have sufficient reserved stock
+            for item in all_items:
+                product_id = item['product_id']
+                quantity = item['quantity']
+                
+                # Check if we can confirm (enough reserved stock)
+                can_confirm = self.inventory_repo.check_confirmation_available(product_id, quantity)
+                if not can_confirm:
+                    raise APIException(
+                        status_code=HTTP_409_CONFLICT,
+                        error_code=ErrorCode.INSUFFICIENT_STOCK,
+                        message=f"Insufficient reserved stock for product {product_id}. "
+                                f"Required: {quantity}"
+                    )
+            
+            # STEP 2: All checks passed - execute confirmations
+            confirmed_ordered_items = []
+            confirmed_consumptions = []
+            
+            # Confirm ordered items
+            for ordered_item_id, data in ordered_item_map.items():
+                product_id = data['product_id']
+                quantity = data['quantity']
+                ordered_item = data['ordered_item']
+                
+                success = self.inventory_repo.confirm_reservation(product_id, quantity)
+                if success:
+                    ordered_item.ordered_item_delivery_status = 'delivered'
+                    ordered_item.reserved_quantity = 0
+                    self.session.add(ordered_item)
+                    
+                    confirmed_ordered_items.append({
+                        'ordered_item_id': ordered_item_id,
+                        'product_id': product_id,
+                        'confirmed_quantity': quantity
+                    })
+                else:
+                    # This should not happen if check passed, but just in case
+                    raise APIException(
+                        status_code=HTTP_409_CONFLICT,
+                        error_code=ErrorCode.INSUFFICIENT_STOCK,
+                        message=f"Failed to confirm ordered item {ordered_item_id}"
+                    )
+            
+            # Confirm consumptions
+            for consumption_id, data in consumption_map.items():
+                product_id = data['product_id']
+                quantity = data['quantity']
+                consumption = data['consumption']
+                
+                success = self.inventory_repo.confirm_reservation(product_id, quantity)
+                if success:
+                    consumption.product_reserved_quantity = 0
+                    self.session.add(consumption)
+                    
+                    confirmed_consumptions.append({
+                        'consumption_id': consumption_id,
+                        'product_id': product_id,
+                        'confirmed_quantity': quantity
+                    })
+                else:
+                    # This should not happen if check passed, but just in case
+                    raise APIException(
+                        status_code=HTTP_409_CONFLICT,
+                        error_code=ErrorCode.INSUFFICIENT_STOCK,
+                        message=f"Failed to confirm consumption {consumption_id}"
+                    )
+            
+            # Commit all changes atomically
+            self.session.commit()
+            
+            return {
+                'ordered_items': {
+                    'success': True,
+                    'success_count': len(confirmed_ordered_items),
+                    'failed_count': 0,
+                    'success_items': confirmed_ordered_items,
+                    'failed_items': []
+                },
+                'consumptions': {
+                    'success': True,
+                    'success_count': len(confirmed_consumptions),
+                    'failed_count': 0,
+                    'success_items': confirmed_consumptions,
+                    'failed_items': []
+                },
+                'overall_success': True,
+                'errors': []
+            }
+            
+        except Exception as e:
+            # Rollback everything
+            self.session.rollback()
+            logger.error(f"Bulk confirmation failed: {e}")
+            raise
